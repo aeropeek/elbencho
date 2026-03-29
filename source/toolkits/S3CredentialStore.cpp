@@ -13,8 +13,8 @@
 #include "toolkits/StringTk.h"
 
 /**
- * Load credentials from a file where each line contains a credential pair in format:
- * access_key:secret_key
+ * Load credentials from a file where each line contains a credential in format:
+ * access_key:secret_key[:session_token]
  */
 void S3CredentialStore::loadCredentialsFromFile(const std::string& filePath)
 {
@@ -45,7 +45,7 @@ void S3CredentialStore::loadCredentialsFromFile(const std::string& filePath)
 
 /**
  * Load credentials from a comma-separated list in format:
- * access_key1:secret_key1,access_key2:secret_key2,...
+ * access_key1:secret_key1[:token1],access_key2:secret_key2[:token2],...
  */
 void S3CredentialStore::loadCredentialsFromList(const std::string& credList)
 {
@@ -73,14 +73,15 @@ void S3CredentialStore::loadCredentialsFromList(const std::string& credList)
 }
 
 /**
- * Add a single credential pair.
+ * Add a single credential.
  */
-void S3CredentialStore::addCredential(const std::string& accessKey, const std::string& secretKey)
+void S3CredentialStore::addCredential(const std::string& accessKey, const std::string& secretKey,
+    const std::string& sessionToken)
 {
     validateCredential(accessKey, secretKey);
 
     std::lock_guard<std::mutex> lock(mutex);
-    credentials.emplace_back(accessKey, secretKey);
+    credentials.emplace_back(accessKey, secretKey, sessionToken);
 }
 
 /**
@@ -96,29 +97,65 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3CredentialStore::getCredent
     size_t index = workerRank % credentials.size();
     const S3Credential& cred = credentials[index];
 
-    return std::make_shared<Aws::Auth::SimpleAWSCredentialsProvider>(cred.accessKey, cred.secretKey);
+    return std::make_shared<Aws::Auth::SimpleAWSCredentialsProvider>(
+        cred.accessKey, cred.secretKey, cred.sessionToken);
 }
 
 /**
- * Parse a credential string in format "access_key:secret_key" and add it to the store.
+ * Get raw credential entry for a given worker rank. Uses round-robin distribution.
+ */
+const S3CredentialStore::S3Credential& S3CredentialStore::getCredentialEntry(size_t workerRank)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+
+    if(credentials.empty())
+        throw ProgException("No S3 credentials available");
+
+    size_t index = workerRank % credentials.size();
+    return credentials[index];
+}
+
+/**
+ * Parse a credential string in format "access_key:secret_key[:session_token]" and add it to the
+ * store. The session token field is optional and used for STS temporary credentials.
  */
 void S3CredentialStore::parseAndAddCredential(const std::string& credStr)
 {
-    StringVec keyPair;
-    boost::split(keyPair, credStr, boost::is_any_of(":"));
+    // split into at most 3 parts (access_key, secret_key, optional session_token)
+    size_t firstColon = credStr.find(':');
+    if(firstColon == std::string::npos)
+        throw ProgException(
+            "Invalid credential format. Expected 'access_key:secret_key[:session_token]', got: " +
+            credStr);
 
-    if(keyPair.size() != 2)
-        throw ProgException("Invalid credential format. Expected 'access_key:secret_key', got: " + credStr);
+    size_t secondColon = credStr.find(':', firstColon + 1);
 
-    std::string accessKey = keyPair[0];
-    std::string secretKey = keyPair[1];
+    std::string accessKey;
+    std::string secretKey;
+    std::string sessionToken;
+
+    if(secondColon == std::string::npos)
+    {
+        // two fields: access_key:secret_key
+        accessKey = credStr.substr(0, firstColon);
+        secretKey = credStr.substr(firstColon + 1);
+    }
+    else
+    {
+        // three fields: access_key:secret_key:session_token
+        accessKey = credStr.substr(0, firstColon);
+        secretKey = credStr.substr(firstColon + 1, secondColon - firstColon - 1);
+        sessionToken = credStr.substr(secondColon + 1);
+        boost::trim(sessionToken);
+    }
+
     boost::trim(accessKey);
     boost::trim(secretKey);
 
     validateCredential(accessKey, secretKey);
 
     std::lock_guard<std::mutex> lock(mutex);
-    credentials.emplace_back(accessKey, secretKey);
+    credentials.emplace_back(accessKey, secretKey, sessionToken);
 }
 
 /**

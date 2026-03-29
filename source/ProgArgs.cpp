@@ -567,9 +567,12 @@ void ProgArgs::defineAllowedArgs()
             "x-amz-sdk-checksum-algorithm header for S3 operations. (EXPERIMENTAL)")
 /*s3c*/	(ARG_S3CREDFILE_LONG, bpo::value(&this->s3CredentialsFile),
 			"Path to file containing multiple S3 credentials. Each line in format: "
-			"access_key:secret_key. Lines starting with # are treated as comments.")
+			"access_key:secret_key[:session_token]. Session token is optional and used for STS "
+			"temporary credentials. Lines starting with # are treated as comments.")
 /*s3c*/	(ARG_S3CREDLIST_LONG, bpo::value(&this->s3CredentialsList),
-			"Comma-separated list of S3 credentials. Each credential in format: access_key:secret_key")
+			"Comma-separated list of S3 credentials. Each credential in format: "
+			"access_key:secret_key[:session_token]. Session token is optional and used for STS "
+			"temporary credentials.")
 /*s3e*/	(ARG_S3ENDPOINTS_LONG, bpo::value(&this->s3EndpointsStr),
 			"Comma-separated list of S3 endpoints. When this argument is used, the given "
 			"benchmark paths are used as bucket names. Also see \"--" ARG_S3ACCESSKEY_LONG "\" & "
@@ -3080,9 +3083,12 @@ void ProgArgs::printHelpS3()
     argsS3ServiceArgsDescription.add_options()
         (ARG_S3CREDFILE_LONG, bpo::value(&this->s3CredentialsFile),
             "Path to file containing multiple S3 credentials. Each line in format: "
-            "access_key:secret_key. Lines starting with # are treated as comments.")
+            "access_key:secret_key[:session_token]. Session token is optional and used for STS "
+            "temporary credentials. Lines starting with # are treated as comments.")
         (ARG_S3CREDLIST_LONG, bpo::value(&this->s3CredentialsList),
-            "Comma-separated list of S3 credentials. Each credential in format: access_key:secret_key")
+            "Comma-separated list of S3 credentials. Each credential in format: "
+            "access_key:secret_key[:session_token]. Session token is optional and used for STS "
+            "temporary credentials.")
         (ARG_S3ENDPOINTS_LONG, bpo::value(&this->s3EndpointsStr),
             "Comma-separated list of S3 endpoints. (Format: [http(s)://]hostname[:port])")
         (ARG_S3ACCESSKEY_LONG, bpo::value(&this->s3AccessKey),

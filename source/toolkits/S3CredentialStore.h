@@ -26,9 +26,11 @@ class S3CredentialStore
         {
             std::string accessKey;
             std::string secretKey;
+            std::string sessionToken; // optional STS session token; empty if not an STS credential
             
-            S3Credential(const std::string& accessKey, const std::string& secretKey) :
-                accessKey(accessKey), secretKey(secretKey) {}
+            S3Credential(const std::string& accessKey, const std::string& secretKey,
+                const std::string& sessionToken = "") :
+                accessKey(accessKey), secretKey(secretKey), sessionToken(sessionToken) {}
         };
 
         /**
@@ -44,7 +46,8 @@ class S3CredentialStore
 
         /**
          * Load credentials from a file.
-         * Each line in the file should be in format: access_key:secret_key
+         * Each line in the file should be in format: access_key:secret_key[:session_token]
+         * Session token is optional and used for STS temporary credentials.
          * Lines starting with # are treated as comments.
          * 
          * @param filePath Path to the credentials file
@@ -54,7 +57,7 @@ class S3CredentialStore
 
         /**
          * Load credentials from a comma-separated list.
-         * List format: "access_key1:secret_key1,access_key2:secret_key2,..."
+         * List format: "access_key1:secret_key1[:token1],access_key2:secret_key2[:token2],..."
          * 
          * @param credList Comma-separated list of credentials
          * @throw ProgException if list has invalid format
@@ -62,22 +65,33 @@ class S3CredentialStore
         void loadCredentialsFromList(const std::string& credList);
 
         /**
-         * Add a single credential pair to the store.
+         * Add a single credential to the store.
          * 
          * @param accessKey S3 access key
          * @param secretKey S3 secret key
+         * @param sessionToken optional STS session token
          */
-        void addCredential(const std::string& accessKey, const std::string& secretKey);
+        void addCredential(const std::string& accessKey, const std::string& secretKey,
+            const std::string& sessionToken = "");
 
         /**
          * Get a credential based on worker rank.
          * Credentials are assigned in round-robin fashion based on the worker rank.
          * 
          * @param workerRank Rank of the worker requesting credentials
-         * @return AWS credentials object
+         * @return AWS credentials provider (includes session token if present)
          * @throw ProgException if no credentials are available
          */
         std::shared_ptr<Aws::Auth::AWSCredentialsProvider> getCredential(size_t workerRank);
+
+        /**
+         * Get raw credential entry based on worker rank (round-robin).
+         * 
+         * @param workerRank Rank of the worker requesting credentials
+         * @return const reference to S3Credential struct
+         * @throw ProgException if no credentials are available
+         */
+        const S3Credential& getCredentialEntry(size_t workerRank);
 
         size_t getNumCredentials() const { return credentials.size(); }
         void clear() { credentials.clear(); }
