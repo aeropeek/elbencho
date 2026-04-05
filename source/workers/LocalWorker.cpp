@@ -601,16 +601,24 @@ void LocalWorker::rotateS3CredIfDue()
     if( (uint64_t)elapsedSec < progArgs->getS3CredRotateSec() )
         return;
 
-    s3CredIdx = S3CredentialStore::getInstance().claimNextCredIdx();
-    size_t numCreds = S3CredentialStore::getInstance().getNumCredentials();
+    if(!progArgs->getS3CredCmd().empty())
+    {
+        s3Client = S3Tk::initS3Client(progArgs, workerRank,
+            &isInterruptionRequested, &s3EndpointStr);
+    }
+    else
+    {
+        s3CredIdx = S3CredentialStore::getInstance().claimNextCredIdx();
+        size_t numCreds = S3CredentialStore::getInstance().getNumCredentials();
 
-    s3Client = S3Tk::initS3Client(progArgs, workerRank, &isInterruptionRequested,
-        &s3EndpointStr, s3CredIdx % numCreds);
+        s3Client = S3Tk::initS3Client(progArgs, workerRank, &isInterruptionRequested,
+            &s3EndpointStr, s3CredIdx % numCreds);
+    }
 
     s3CredWindowStart = now;
+    opsSinceCredCheck = 0;
 
-    LOGGER(Log_DEBUG, "Rotated S3 credential. Worker rank: " << workerRank << "; "
-        "New cred index: " << (s3CredIdx % numCreds) << std::endl);
+    LOGGER(Log_DEBUG, "Rotated S3 credential. Worker rank: " << workerRank << std::endl);
 
 #endif // S3_SUPPORT
 }

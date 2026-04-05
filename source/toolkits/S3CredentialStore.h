@@ -9,6 +9,7 @@
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
 #include <atomic>
+#include <cstdio>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -94,9 +95,19 @@ class S3CredentialStore
          */
         const S3Credential& getCredentialEntry(size_t workerRank);
 
+        void openCredCmdPipe(const std::string& cmd);
+        std::shared_ptr<Aws::Auth::AWSCredentialsProvider> readCredFromPipe();
+        void closeCredCmdPipe();
+        bool hasCredCmdPipe() const { return credCmdPipe != nullptr; }
+
         size_t getNumCredentials() const { return credentials.size(); }
         uint64_t claimNextCredIdx();
-        void clear() { credentials.clear(); nextCredIdx.store(0, std::memory_order_relaxed); }
+        void clear()
+        {
+            credentials.clear();
+            nextCredIdx.store(0, std::memory_order_relaxed);
+            closeCredCmdPipe();
+        }
 
     private:
         S3CredentialStore() {} // private constructor for singleton
@@ -108,6 +119,9 @@ class S3CredentialStore
         std::vector<S3Credential> credentials; // Store for all loaded credentials
         mutable std::mutex mutex; // Mutex for thread-safe access
         std::atomic<uint64_t> nextCredIdx{0}; // global counter for credential rotation
+
+        FILE* credCmdPipe{nullptr}; // long-lived credential provider subprocess pipe
+        std::mutex pipeMutex; // serializes reads from the credential pipe
 
         void parseAndAddCredential(const std::string& credStr);
         void validateCredential(const std::string& accessKey, const std::string& secretKey);

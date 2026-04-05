@@ -19,6 +19,7 @@
 #include "toolkits/FileTk.h"
 #include "toolkits/HashTk.h"
 #include "toolkits/NumaTk.h"
+#include "toolkits/S3CredentialStore.h"
 #include "toolkits/S3Tk.h"
 #include "toolkits/TerminalTk.h"
 #include "toolkits/TranslatorTk.h"
@@ -580,11 +581,18 @@ void ProgArgs::defineAllowedArgs()
 			"Comma-separated list of S3 credentials. Each credential in format: "
 			"access_key:secret_key[:session_token]. Session token is optional and used for STS "
 			"temporary credentials.")
+/*s3c*/	(ARG_S3CREDCMD_LONG, bpo::value(&this->s3CredCmd)->default_value(""),
+			"Run a long-lived credential provider subprocess. The command's stdout "
+			"must produce one credential per line in format: "
+			"access_key:secret_key:session_token. Lines starting with # are skipped. "
+			"The subprocess is started once at init and kept alive for the entire "
+			"benchmark. Mutually exclusive with --" ARG_S3CREDFILE_LONG
+			" and --" ARG_S3CREDLIST_LONG ".")
 /*s3c*/	(ARG_S3CREDROTATE_LONG, bpo::value(&this->s3CredRotateSec)->default_value(0),
 			"Rotate each thread's S3 credential every N seconds. Each thread claims "
 			"the next unclaimed credential from the pool atomically, so no two threads "
 			"ever share a credential at the same time. Requires --" ARG_S3CREDFILE_LONG
-			" or --" ARG_S3CREDLIST_LONG ". 0 = disabled (default).")
+			", --" ARG_S3CREDLIST_LONG ", or --" ARG_S3CREDCMD_LONG ". 0 = disabled (default).")
 /*s3e*/	(ARG_S3ENDPOINTS_LONG, bpo::value(&this->s3EndpointsStr),
 			"Comma-separated list of S3 endpoints. When this argument is used, the given "
 			"benchmark paths are used as bucket names. Also see \"--" ARG_S3ACCESSKEY_LONG "\" & "
@@ -968,6 +976,7 @@ void ProgArgs::defineDefaults()
 	this->s3IgnoreMultipartUpload404 = false;
 	this->stdoutDupFD = -1;
     this->s3ChecksumAlgoStr = "";  // Default to empty string (resolved as NOT_SET)
+	this->s3CredCmd = "";
 	this->s3CredentialsFile = "";
 	this->s3CredentialsList = "";
 	this->s3CredRotateSec = 0;
@@ -1344,19 +1353,28 @@ void ProgArgs::checkArgs()
 
     checkPathDependentArgs();
 
+    // --s3credcmd is mutually exclusive with --s3credfile and --s3credlist
+    if(!s3CredCmd.empty() && (!s3CredentialsFile.empty() || !s3CredentialsList.empty()))
+        throw ProgException("--" ARG_S3CREDCMD_LONG " is mutually exclusive with --"
+            ARG_S3CREDFILE_LONG " and --" ARG_S3CREDLIST_LONG ".");
+
     // Check that only one credential source is specified
     if(!s3CredentialsFile.empty() && !s3CredentialsList.empty())
         throw ProgException("Only one of --" ARG_S3CREDFILE_LONG " or --"
             ARG_S3CREDLIST_LONG " may be specified.");
 
     // If using multi-credentials, s3AccessKey and s3AccessSecret must be empty
-    if((!s3CredentialsFile.empty() || !s3CredentialsList.empty()) &&
+    if((!s3CredentialsFile.empty() || !s3CredentialsList.empty() || !s3CredCmd.empty()) &&
         (!s3AccessKey.empty() || !s3AccessSecret.empty()))
         throw ProgException("Cannot specify both multi-credentials and single credential options.");
 
-    if(s3CredRotateSec && s3CredentialsFile.empty() && s3CredentialsList.empty())
+    if(s3CredRotateSec && s3CredentialsFile.empty() && s3CredentialsList.empty() &&
+        s3CredCmd.empty())
         throw ProgException("--" ARG_S3CREDROTATE_LONG " requires --" ARG_S3CREDFILE_LONG
-            " or --" ARG_S3CREDLIST_LONG ".");
+            ", --" ARG_S3CREDLIST_LONG ", or --" ARG_S3CREDCMD_LONG ".");
+
+    if(!s3CredCmd.empty())
+        S3CredentialStore::getInstance().openCredCmdPipe(s3CredCmd);
 
     if(rampupSec && numThreads <= 1)
         LOGGER(Log_NORMAL, "NOTE: --" ARG_RAMPUP_LONG " has no effect with a single thread."
@@ -3112,11 +3130,18 @@ void ProgArgs::printHelpS3()
             "Comma-separated list of S3 credentials. Each credential in format: "
             "access_key:secret_key[:session_token]. Session token is optional and used for STS "
             "temporary credentials.")
+        (ARG_S3CREDCMD_LONG, bpo::value(&this->s3CredCmd)->default_value(""),
+            "Run a long-lived credential provider subprocess. The command's stdout "
+            "must produce one credential per line in format: "
+            "access_key:secret_key:session_token. Lines starting with # are skipped. "
+            "The subprocess is started once at init and kept alive for the entire "
+            "benchmark. Mutually exclusive with --" ARG_S3CREDFILE_LONG
+            " and --" ARG_S3CREDLIST_LONG ".")
         (ARG_S3CREDROTATE_LONG, bpo::value(&this->s3CredRotateSec)->default_value(0),
             "Rotate each thread's S3 credential every N seconds. Each thread claims "
             "the next unclaimed credential from the pool atomically, so no two threads "
             "ever share a credential at the same time. Requires --" ARG_S3CREDFILE_LONG
-            " or --" ARG_S3CREDLIST_LONG ". 0 = disabled (default).")
+            ", --" ARG_S3CREDLIST_LONG ", or --" ARG_S3CREDCMD_LONG ". 0 = disabled (default).")
         (ARG_S3ENDPOINTS_LONG, bpo::value(&this->s3EndpointsStr),
             "Comma-separated list of S3 endpoints. (Format: [http(s)://]hostname[:port])")
         (ARG_S3ACCESSKEY_LONG, bpo::value(&this->s3AccessKey),
@@ -3529,6 +3554,7 @@ void ProgArgs::setFromPropertyTreeForService(bpt::ptree& tree)
 	s3AclGrantee = tree.get<std::string>(ARG_S3ACLGRANTEE_LONG);
 	s3AclGranteePermissions = tree.get<std::string>(ARG_S3ACLGRANTS_LONG);
 	s3AclGranteeType = tree.get<std::string>(ARG_S3ACLGRANTEETYPE_LONG);
+	s3CredCmd = tree.get<std::string>(ARG_S3CREDCMD_LONG);
 	s3CredentialsFile = tree.get<std::string>(ARG_S3CREDFILE_LONG);
     s3CredentialsList = tree.get<std::string>(ARG_S3CREDLIST_LONG);
 	s3CredRotateSec = tree.get<uint64_t>(ARG_S3CREDROTATE_LONG);
@@ -3691,6 +3717,7 @@ void ProgArgs::getAsPropertyTreeForService(bpt::ptree& outTree, size_t serviceRa
     outTree.put(ARG_S3BUCKETVERVERIFY_LONG, doS3BucketVersioningVerify);
     outTree.put(ARG_S3CHECKSUM_ALGO_LONG, s3ChecksumAlgoStr);
     outTree.put(ARG_S3CLIENTSINGLETON_LONG, useS3ClientSingleton);
+	outTree.put(ARG_S3CREDCMD_LONG, s3CredCmd);
 	outTree.put(ARG_S3CREDFILE_LONG, s3CredentialsFile);
     outTree.put(ARG_S3CREDLIST_LONG, s3CredentialsList);
 	outTree.put(ARG_S3CREDROTATE_LONG, s3CredRotateSec);

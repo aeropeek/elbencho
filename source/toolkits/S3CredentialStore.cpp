@@ -179,4 +179,89 @@ void S3CredentialStore::validateCredential(const std::string& accessKey, const s
         throw ProgException("S3 secret key cannot be empty");
 }
 
+/**
+ * Start a long-lived credential provider subprocess via popen. The subprocess must produce one
+ * credential per line on its stdout in format: access_key:secret_key:session_token.
+ */
+void S3CredentialStore::openCredCmdPipe(const std::string& cmd)
+{
+    std::lock_guard<std::mutex> lock(pipeMutex);
+
+    if(credCmdPipe)
+        throw ProgException("Credential command pipe already open");
+
+    credCmdPipe = popen(cmd.c_str(), "r");
+    if(!credCmdPipe)
+        throw ProgException("Failed to start credential command: " + cmd);
+
+    LOGGER(Log_NORMAL, "Started credential provider: " << cmd << std::endl);
+}
+
+/**
+ * Read the next credential line from the provider pipe, skipping comments and empty lines.
+ */
+std::shared_ptr<Aws::Auth::AWSCredentialsProvider>
+S3CredentialStore::readCredFromPipe()
+{
+    std::lock_guard<std::mutex> lock(pipeMutex);
+
+    if(!credCmdPipe)
+        throw ProgException("Credential command pipe not open");
+
+    char buf[16384];
+
+    while(true)
+    {
+        if(!fgets(buf, sizeof(buf), credCmdPipe))
+            throw ProgException(
+                "Credential provider closed unexpectedly (EOF or error)");
+
+        std::string line(buf);
+
+        while(!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+            line.pop_back();
+
+        if(line.empty() || line[0] == '#')
+            continue;
+
+        size_t pos1 = line.find(':');
+        if(pos1 == std::string::npos)
+            throw ProgException(
+                "Invalid credential line (missing first ':'): " + line.substr(0, 40));
+
+        size_t pos2 = line.find(':', pos1 + 1);
+        if(pos2 == std::string::npos)
+            throw ProgException(
+                "Invalid credential line (missing second ':'): " + line.substr(0, 40));
+
+        std::string accessKey    = line.substr(0, pos1);
+        std::string secretKey    = line.substr(pos1 + 1, pos2 - pos1 - 1);
+        std::string sessionToken = line.substr(pos2 + 1);
+
+        return Aws::MakeShared<Aws::Auth::SimpleAWSCredentialsProvider>(
+            "elbencho",
+            Aws::Auth::AWSCredentials(
+                Aws::String(accessKey.c_str()),
+                Aws::String(secretKey.c_str()),
+                Aws::String(sessionToken.c_str())
+            )
+        );
+    }
+}
+
+/**
+ * Close the credential provider pipe if open.
+ */
+void S3CredentialStore::closeCredCmdPipe()
+{
+    std::lock_guard<std::mutex> lock(pipeMutex);
+
+    if(credCmdPipe)
+    {
+        pclose(credCmdPipe);
+        credCmdPipe = nullptr;
+        LOGGER(Log_NORMAL, "Closed credential provider pipe." << std::endl);
+    }
+}
+
 #endif /* S3_SUPPORT */ 

@@ -349,6 +349,14 @@ All options in alphabetical order:
   --s3credfile arg        Path to file containing multiple S3 credentials. Each
                           line in format: access_key:secret_key. Lines starting
                           with # are treated as comments.
+  --s3credcmd arg         Run a long-lived credential provider subprocess.
+                          The command's stdout must produce one credential per
+                          line in format: access_key:secret_key:session_token.
+                          The subprocess is started once and kept alive for the
+                          entire benchmark. Each thread reads one credential at
+                          init; with --s3credrotate, threads read additional
+                          credentials on each rotation. Mutually exclusive with
+                          --s3credfile and --s3credlist.
   --s3credlist arg        Comma-separated list of S3 credentials. Each 
                           credential in format: access_key:secret_key
   --s3credrotate arg      Rotate each thread's S3 credential every N seconds.

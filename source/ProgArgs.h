@@ -160,6 +160,7 @@ namespace bpt = boost::property_tree;
 #define ARG_S3BUCKETVER_LONG        "s3bversion"
 #define ARG_S3BUCKETVERVERIFY_LONG  "s3bversionverify"
 #define ARG_S3CLIENTSINGLETON_LONG  "s3single"
+#define ARG_S3CREDCMD_LONG          "s3credcmd"
 #define ARG_S3CREDFILE_LONG         "s3credfile"
 #define ARG_S3CREDLIST_LONG         "s3credlist"
 #define ARG_S3CREDROTATE_LONG       "s3credrotate"
@@ -493,6 +494,7 @@ class ProgArgs
 		std::string s3AclGrantee; // s3 acl grantee
 		std::string s3AclGranteeType; // s3 acl grantee type
 		std::string s3AclGranteePermissions; // s3 acl grantee permission flags (ARG_S3_ACL_...)
+		std::string s3CredCmd; // external credential provider command (long-lived subprocess)
 		std::string s3CredentialsFile; // path to file containing multiple S3 credentials
         std::string s3CredentialsList; // comma-separated list of S3 credentials
 		uint64_t s3CredRotateSec{0}; // rotate each thread's S3 credential every N seconds; 0=off
@@ -768,6 +770,7 @@ class ProgArgs
         std::string getS3AclGrantee() const { return s3AclGrantee; }
         std::string getS3AclGranteeType() const { return s3AclGranteeType; }
         std::string getS3AclGranteePermissions() const { return s3AclGranteePermissions; }
+		std::string getS3CredCmd() const { return s3CredCmd; }
 		std::string getS3CredentialsFile() const { return s3CredentialsFile; }
         std::string getS3CredentialsList() const { return s3CredentialsList; }
 		uint64_t getS3CredRotateSec() const { return s3CredRotateSec; }

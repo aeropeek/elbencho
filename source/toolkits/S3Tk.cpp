@@ -270,7 +270,14 @@ std::shared_ptr<S3Client> S3Tk::initS3Client(const ProgArgs* progArgs,
 
     std::shared_ptr<Aws::Auth::AWSCredentialsProvider> credentialsProvider;
 
-    if(!progArgs->getS3AccessKey().empty() || !progArgs->getS3AccessSecret().empty())
+    if(!progArgs->getS3CredCmd().empty())
+    {
+        credentialsProvider = S3CredentialStore::getInstance().readCredFromPipe();
+
+        LOGGER(Log_DEBUG, "Using credential from pipe. "
+            "Worker rank: " << workerRank << std::endl);
+    }
+    else if(!progArgs->getS3AccessKey().empty() || !progArgs->getS3AccessSecret().empty())
     {
         // Single credential mode
         credentialsProvider = std::make_shared<Aws::Auth::SimpleAWSCredentialsProvider>(
