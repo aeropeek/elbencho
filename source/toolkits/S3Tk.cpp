@@ -157,13 +157,17 @@ void S3Tk::uninitS3Global(const ProgArgs* progArgs)
  *
  * @workerRank to select s3 endpoint if multiple endpoints are available in progArgs; otherwise
  *     a clock-based random number will be chosen.
- * * @isInterruptionRequested will be given to S3 retry strategy object to stop retries if
+ * @isInterruptionRequested will be given to S3 retry strategy object to stop retries if
  *     interruption was requested; can be NULL.
  * @outS3EndpointStr will be set to the selected s3 endpoint from progArgs vec; can be NULL.
+ * @credIdx explicit credential index for multi-credential mode; SIZE_MAX means use workerRank.
  */
 std::shared_ptr<S3Client> S3Tk::initS3Client(const ProgArgs* progArgs,
-    size_t workerRank, std::atomic_bool* isInterruptionRequested, std::string* outS3EndpointStr)
+    size_t workerRank, std::atomic_bool* isInterruptionRequested, std::string* outS3EndpointStr,
+    size_t credIdx)
 {
+    const size_t effectiveCredIdx = (credIdx == SIZE_MAX) ? workerRank : credIdx;
+
     if(progArgs->getS3EndpointsVec().empty() )
         throw ProgException(std::string(__func__) + " cannot init S3 client if no S3 endpoints are "
             "provided.");
@@ -275,11 +279,11 @@ std::shared_ptr<S3Client> S3Tk::initS3Client(const ProgArgs* progArgs,
     }
     else if(!progArgs->getS3CredentialsFile().empty() || !progArgs->getS3CredentialsList().empty())
     {
-        // Multi-credential mode (round-robin)
-        credentialsProvider = S3CredentialStore::getInstance().getCredential(workerRank);
+        credentialsProvider = S3CredentialStore::getInstance().getCredential(effectiveCredIdx);
 
         LOGGER(Log_DEBUG, "Using multi-credential from store. "
-            "Worker rank: " << workerRank << std::endl);
+            "Worker rank: " << workerRank << "; "
+            "Cred index: " << effectiveCredIdx << std::endl);
     }
     else
     {

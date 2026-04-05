@@ -8,6 +8,7 @@
 
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -94,7 +95,8 @@ class S3CredentialStore
         const S3Credential& getCredentialEntry(size_t workerRank);
 
         size_t getNumCredentials() const { return credentials.size(); }
-        void clear() { credentials.clear(); }
+        uint64_t claimNextCredIdx();
+        void clear() { credentials.clear(); nextCredIdx.store(0, std::memory_order_relaxed); }
 
     private:
         S3CredentialStore() {} // private constructor for singleton
@@ -105,6 +107,7 @@ class S3CredentialStore
 
         std::vector<S3Credential> credentials; // Store for all loaded credentials
         mutable std::mutex mutex; // Mutex for thread-safe access
+        std::atomic<uint64_t> nextCredIdx{0}; // global counter for credential rotation
 
         void parseAndAddCredential(const std::string& credStr);
         void validateCredential(const std::string& accessKey, const std::string& secretKey);

@@ -159,6 +159,15 @@ void S3CredentialStore::parseAndAddCredential(const std::string& credStr)
 }
 
 /**
+ * Atomically claim and return the next credential index. Used by credential rotation to ensure
+ * no two threads ever get the same index in a given rotation window.
+ */
+uint64_t S3CredentialStore::claimNextCredIdx()
+{
+    return nextCredIdx.fetch_add(1, std::memory_order_relaxed);
+}
+
+/**
  * Validate that the provided credentials are not empty.
  */
 void S3CredentialStore::validateCredential(const std::string& accessKey, const std::string& secretKey)

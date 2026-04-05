@@ -118,7 +118,8 @@ class S3Tk
             const ProgArgs* progArgs, size_t workerRank =
                 std::chrono::system_clock::now().time_since_epoch().count(),
                 std::atomic_bool* isInterruptionRequested = NULL,
-                std::string* outS3EndpointStr = NULL);
+                std::string* outS3EndpointStr = NULL,
+                size_t credIdx = SIZE_MAX);
         static Aws::String computeKeyMD5(const Aws::String& key);
         static void scanCustomTree(const ProgArgs* progArgs, std::shared_ptr<S3Client> s3Client,
             std::string bucketName, std::string objectPrefix, std::string outTreeFilePath);
