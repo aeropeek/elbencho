@@ -130,6 +130,7 @@ namespace bpt = boost::property_tree;
 #define ARG_RANDOMAMOUNT_LONG		"randamount"
 #define ARG_RANDOMOFFSETS_LONG		"rand"
 #define ARG_RANDSEEKALGO_LONG		"randalgo"
+#define ARG_RAMPUP_LONG				"rampup"
 #define ARG_RANKOFFSET_LONG			"rankoffset"
 #define ARG_READ_LONG				"read"
 #define ARG_READ_SHORT				"r"
@@ -159,8 +160,10 @@ namespace bpt = boost::property_tree;
 #define ARG_S3BUCKETVER_LONG        "s3bversion"
 #define ARG_S3BUCKETVERVERIFY_LONG  "s3bversionverify"
 #define ARG_S3CLIENTSINGLETON_LONG  "s3single"
+#define ARG_S3CREDCMD_LONG          "s3credcmd"
 #define ARG_S3CREDFILE_LONG         "s3credfile"
 #define ARG_S3CREDLIST_LONG         "s3credlist"
+#define ARG_S3CREDROTATE_LONG       "s3credrotate"
 #define ARG_S3ENDPOINTS_LONG		"s3endpoints"
 #define ARG_S3FASTGET_LONG			"s3fastget"
 #define ARG_S3FASTPUT_LONG          "s3fastput"
@@ -462,6 +465,7 @@ class ProgArgs
 		uint64_t randomAmount; // random bytes to read/write per file (when randomOffsets is used)
 		std::string randomAmountOrigStr; // original randomAmount str from user with unit
 		std::string randOffsetAlgo; // rand algo for random offsets
+		uint64_t rampupSec{0}; // spread thread startup over N seconds; 0=simultaneous
 		size_t rankOffset; // offset for worker rank numbers
 		std::string resFilePath; // results output file path (or empty for no results file)
 		unsigned short rotateHostsNum; // number by which to rotate hosts between phases
@@ -490,8 +494,10 @@ class ProgArgs
 		std::string s3AclGrantee; // s3 acl grantee
 		std::string s3AclGranteeType; // s3 acl grantee type
 		std::string s3AclGranteePermissions; // s3 acl grantee permission flags (ARG_S3_ACL_...)
+		std::string s3CredCmd; // external credential provider command (long-lived subprocess)
 		std::string s3CredentialsFile; // path to file containing multiple S3 credentials
         std::string s3CredentialsList; // comma-separated list of S3 credentials
+		uint64_t s3CredRotateSec{0}; // rotate each thread's S3 credential every N seconds; 0=off
 		std::string s3EndpointsServiceOverrideStr; // override of s3EndpointStr in service mode
 		StringVec s3EndpointsVec; // s3 endpoints broken down into individual elements
 		std::string s3EndpointsStr; // user-given s3 endpoints; elem format: [http(s)://]host[:port]
@@ -735,6 +741,7 @@ class ProgArgs
 		bool getQuitServices() const { return quitServices; }
         std::string getRandOffsetAlgo() const { return randOffsetAlgo; }
 		uint64_t getRandomAmount() const { return randomAmount; }
+        uint64_t getRampupSec() const { return rampupSec; }
         size_t getRankOffset() const { return rankOffset; }
         std::string getResFilePath() const { return resFilePath; }
         unsigned getRotateHostsNum() const { return rotateHostsNum; }
@@ -763,8 +770,10 @@ class ProgArgs
         std::string getS3AclGrantee() const { return s3AclGrantee; }
         std::string getS3AclGranteeType() const { return s3AclGranteeType; }
         std::string getS3AclGranteePermissions() const { return s3AclGranteePermissions; }
+		std::string getS3CredCmd() const { return s3CredCmd; }
 		std::string getS3CredentialsFile() const { return s3CredentialsFile; }
         std::string getS3CredentialsList() const { return s3CredentialsList; }
+		uint64_t getS3CredRotateSec() const { return s3CredRotateSec; }
         std::string getS3EndpointsServiceOverride() const { return s3EndpointsServiceOverrideStr; }
         std::string getS3EndpointsStr() const { return s3EndpointsStr; }
         const StringVec& getS3EndpointsVec() const { return s3EndpointsVec; }

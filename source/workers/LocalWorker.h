@@ -157,6 +157,10 @@ class LocalWorker : public Worker
         std::string s3SSECKeyMD5; // SSE-C encryption key MD5 hash
         std::string s3SSEKMSKey; // SSE-KMS encryption key
 		S3ChecksumAlgorithm s3ChecksumAlgorithm; // for x-amz-sdk-checksum-algorithm header
+
+		uint64_t s3CredIdx{0}; // current credential index for rotation
+		std::chrono::steady_clock::time_point s3CredWindowStart;
+		size_t opsSinceCredCheck{0}; // ops counter to amortise clock reads
 #endif
 
 #ifdef HDFS_SUPPORT
@@ -189,6 +193,7 @@ class LocalWorker : public Worker
         void uninitLibAio();
 		void initS3Client();
 		void uninitS3Client();
+		void rotateS3CredIfDue();
 		void initHDFS();
 		void uninitHDFS();
 		void initNetBench();

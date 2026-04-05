@@ -8,6 +8,7 @@
 #include "LocalWorker.h"
 #include "toolkits/FileTk.h"
 #include "toolkits/random/RandAlgoSelectorTk.h"
+#include "toolkits/S3CredentialStore.h"
 #include "toolkits/S3Tk.h"
 #include "toolkits/StringTk.h"
 #include "toolkits/TranslatorTk.h"
@@ -177,6 +178,16 @@ void LocalWorker::run()
 	try
 	{
 		buuids::uuid currentBenchID = buuids::nil_uuid();
+
+		// stagger thread startup if ramp-up is configured
+		if(progArgs->getRampupSec() > 0 && workerRank > 0)
+		{
+			uint64_t numThreads = progArgs->getNumThreads();
+			uint64_t delayMs = (uint64_t)workerRank *
+				(progArgs->getRampupSec() * 1000ULL) / numThreads;
+			if(delayMs > 0)
+				std::this_thread::sleep_for(std::chrono::milliseconds(delayMs) );
+		}
 
 		// preparation phase
 		preparePhase();
@@ -510,9 +521,13 @@ void LocalWorker::initS3Client()
     }
     else
     { // using per-worker s3 client instances
+        s3CredIdx = workerRank;
         s3Client = S3Tk::initS3Client(progArgs, workerRank, &isInterruptionRequested,
-            &s3EndpointStr);
+            &s3EndpointStr, s3CredIdx);
     }
+
+    s3CredWindowStart = std::chrono::steady_clock::now();
+    opsSinceCredCheck = 0;
 
     useS3SSE = progArgs->getUseS3SSE();
 
@@ -564,6 +579,46 @@ void LocalWorker::uninitS3Client()
 	// s3Client is a std::shared_ptr, so reset() will cleanup the client object
 	// (note: this could also be the shared singleton s3 client from ProgArgs)
 	s3Client.reset();
+
+#endif // S3_SUPPORT
+}
+
+/**
+ * If credential rotation is enabled, check whether this thread's rotation window has elapsed and,
+ * if so, atomically claim the next credential from the pool and reinitialise the S3 client.
+ */
+void LocalWorker::rotateS3CredIfDue()
+{
+#ifdef S3_SUPPORT
+
+    if(!progArgs->getS3CredRotateSec() )
+        return;
+
+    auto now = std::chrono::steady_clock::now();
+    auto elapsedSec = std::chrono::duration_cast<std::chrono::seconds>(
+        now - s3CredWindowStart).count();
+
+    if( (uint64_t)elapsedSec < progArgs->getS3CredRotateSec() )
+        return;
+
+    if(!progArgs->getS3CredCmd().empty())
+    {
+        s3Client = S3Tk::initS3Client(progArgs, workerRank,
+            &isInterruptionRequested, &s3EndpointStr);
+    }
+    else
+    {
+        s3CredIdx = S3CredentialStore::getInstance().claimNextCredIdx();
+        size_t numCreds = S3CredentialStore::getInstance().getNumCredentials();
+
+        s3Client = S3Tk::initS3Client(progArgs, workerRank, &isInterruptionRequested,
+            &s3EndpointStr, s3CredIdx % numCreds);
+    }
+
+    s3CredWindowStart = now;
+    opsSinceCredCheck = 0;
+
+    LOGGER(Log_DEBUG, "Rotated S3 credential. Worker rank: " << workerRank << std::endl);
 
 #endif // S3_SUPPORT
 }
@@ -3771,6 +3826,12 @@ void LocalWorker::s3ModeIterateBuckets()
 	{
 		checkInterruptionRequest();
 
+		if(++opsSinceCredCheck >= 100)
+		{
+			opsSinceCredCheck = 0;
+			rotateS3CredIfDue();
+		}
+
 		workerGotPhaseWork = true;
         const auto& bucketName = bucketVec[bucketIndex];
 
@@ -3894,6 +3955,12 @@ void LocalWorker::s3ModeIterateObjects()
 			// occasional interruption check
 			IF_UNLIKELY( (fileIndex % INTERRUPTION_CHECK_INTERVAL) == 0)
 				checkInterruptionRequest();
+
+			if(++opsSinceCredCheck >= 100)
+			{
+				opsSinceCredCheck = 0;
+				rotateS3CredIfDue();
+			}
 
 			// generate current dir path
 			int printRes;
@@ -4050,6 +4117,12 @@ void LocalWorker::s3ModeIterateObjectsRand()
 		IF_UNLIKELY( (numBytesDone % interruptCheckBytes) == 0)
 			checkInterruptionRequest();
 
+		if(++opsSinceCredCheck >= 100)
+		{
+			opsSinceCredCheck = 0;
+			rotateS3CredIfDue();
+		}
+
 		const size_t dirIndex = randDirIndexGen.getNextOffset();
 		const size_t fileIndex = randFileIndexGen.getNextOffset();
 		const uint64_t currentBlockSize = rwOffsetGen->getNextBlockSizeToSubmit();
@@ -4133,6 +4206,12 @@ void LocalWorker::s3ModeIterateCustomObjects()
 		// occasional interruption check
 		if( (numFilesDone % INTERRUPTION_CHECK_INTERVAL) == 0)
 			checkInterruptionRequest();
+
+		if(++opsSinceCredCheck >= 100)
+		{
+			opsSinceCredCheck = 0;
+			rotateS3CredIfDue();
+		}
 
 		std::chrono::steady_clock::time_point ioStartT = std::chrono::steady_clock::now();
 
@@ -5369,20 +5448,22 @@ void LocalWorker::s3ModeUploadObjectMultiPartShared(std::string bucketName, std:
 
 		IF_UNLIKELY(!uploadPartOutcome.IsSuccess() )
 		{
-			// (note: abort message will be sent during s3SharedUploadStore cleanup)
+			if(!progArgs->getIgnoreS3Errors() )
+			{
+				auto s3Error = uploadPartOutcome.GetError();
 
-			auto s3Error = uploadPartOutcome.GetError();
-
-			throw WorkerException(std::string("Shared multipart part upload failed. ") +
-				"Endpoint: " + s3EndpointStr + "; "
-				"Bucket: " + bucketName + "; "
-				"Object: " + objectName + "; "
-				"Part: " + std::to_string(currentPartNum) + "; "
-				"UploadID: " + uploadID + "; "
-				"Rank: " + std::to_string(workerRank) + "; "
-				"Exception: " + s3Error.GetExceptionName() + "; " +
-				"Message: " + s3Error.GetMessage() + "; " +
-				"HTTP Error Code: " + std::to_string( (int)s3Error.GetResponseCode() ) );
+				throw WorkerException(std::string("Shared multipart part upload failed. ") +
+					"Endpoint: " + s3EndpointStr + "; "
+					"Bucket: " + bucketName + "; "
+					"Object: " + objectName + "; "
+					"Part: " + std::to_string(currentPartNum) + "; "
+					"UploadID: " + uploadID + "; "
+					"Rank: " + std::to_string(workerRank) + "; "
+					"Exception: " + s3Error.GetExceptionName() + "; " +
+					"Message: " + s3Error.GetMessage() + "; " +
+					"HTTP Error Code: " + std::to_string( (int)s3Error.GetResponseCode() ) );
+			}
+			break;
 		}
 
 		// mark part as completed
@@ -5456,7 +5537,8 @@ void LocalWorker::s3ModeUploadObjectMultiPartShared(std::string bucketName, std:
         auto s3Error = completionOutcome.GetError();
 
         if (!(progArgs->getS3IgnoreMultipartUpload404() &&
-              s3Error.GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND))
+              s3Error.GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) &&
+            !progArgs->getIgnoreS3Errors() )
         {
             s3AbortMultipartUpload(bucketName, objectName, uploadID);
 
@@ -5607,20 +5689,22 @@ void LocalWorker::s3ModeUploadObjectMultiPartSharedAsync(std::string bucketName,
 
                 IF_UNLIKELY(!uploadPartOutcome.IsSuccess() )
                 {
-                    // (note: abort message will be sent during s3SharedUploadStore cleanup)
+                    if(!progArgs->getIgnoreS3Errors() )
+                    {
+                        auto s3Error = uploadPartOutcome.GetError();
 
-                    auto s3Error = uploadPartOutcome.GetError();
-
-                    throw WorkerException(std::string("Shared multipart part upload failed. ") +
-                        "Endpoint: " + s3EndpointStr + "; "
-                        "Bucket: " + bucketName + "; "
-                        "Object: " + objectName + "; "
-                        "Part: " + std::to_string(asyncPartContext.partNum) + "; "
-                        "UploadID: " + uploadID + "; "
-                        "Rank: " + std::to_string(workerRank) + "; "
-                        "Exception: " + s3Error.GetExceptionName() + "; " +
-                        "Message: " + s3Error.GetMessage() + "; " +
-                        "HTTP Error Code: " + std::to_string( (int)s3Error.GetResponseCode() ) );
+                        throw WorkerException(std::string("Shared multipart part upload failed. ") +
+                            "Endpoint: " + s3EndpointStr + "; "
+                            "Bucket: " + bucketName + "; "
+                            "Object: " + objectName + "; "
+                            "Part: " + std::to_string(asyncPartContext.partNum) + "; "
+                            "UploadID: " + uploadID + "; "
+                            "Rank: " + std::to_string(workerRank) + "; "
+                            "Exception: " + s3Error.GetExceptionName() + "; " +
+                            "Message: " + s3Error.GetMessage() + "; " +
+                            "HTTP Error Code: " + std::to_string( (int)s3Error.GetResponseCode() ) );
+                    }
+                    break;
                 }
 
                 // mark part as completed
@@ -5723,7 +5807,8 @@ void LocalWorker::s3ModeUploadObjectMultiPartSharedAsync(std::string bucketName,
         auto s3Error = completionOutcome.GetError();
 
         if (!(progArgs->getS3IgnoreMultipartUpload404() &&
-              s3Error.GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND))
+              s3Error.GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) &&
+            !progArgs->getIgnoreS3Errors() )
         {
             s3AbortMultipartUpload(bucketName, objectName, uploadID);
 
@@ -6803,7 +6888,6 @@ void LocalWorker::s3ModeGetObjectTags(const std::string& bucketName, const std::
 
     s3ModeThrowOnError(getTagOutcome, "Get object tagging failed.", bucketName, objectName);
 
-    // Continue only if we need to verify
     if (!progArgs->getDoS3ObjectTaggingVerify())
         return;
 
@@ -6897,7 +6981,6 @@ void LocalWorker::s3ModeGetObjectLockConfiguration(const std::string &bucketName
 
     s3ModeThrowOnError(getObjLockOutcome, "Get object lock configuration failed.", bucketName);
 
-    // Continue only if we need to verify
     if (!progArgs->getDoS3ObjectLockConfigurationVerify())
         return;
 

@@ -36,6 +36,7 @@ void SignalTk::registerFaultSignalHandlers(const ProgArgs& progArgs)
 	if(progArgs.getUseHDFS() && progArgs.getHostsStr().empty() )
 		return;
 
+	std::signal(SIGPIPE, SIG_IGN);
 	std::signal(SIGSEGV, SignalTk::faultSignalHandler);
 	std::signal(SIGFPE, SignalTk::faultSignalHandler);
 	std::signal(SIGBUS, SignalTk::faultSignalHandler);

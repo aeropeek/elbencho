@@ -268,6 +268,14 @@ All options in alphabetical order:
   --randamount arg        Number of bytes to write/read when using random 
                           offsets. Only effective when benchmark path is a file
                           or block device. (Default: Set to file size)
+  --rampup arg            Spread thread startup over N seconds. Thread T 
+                          sleeps for T*(N*1000/numThreads) milliseconds before
+                          its first operation, so threads ramp up evenly 
+                          across the interval. Thread 0 always starts 
+                          immediately. 0 = all threads start simultaneously 
+                          (default). Note: --timelimit counts from wall-clock
+                          start, not from when the last thread finishes 
+                          ramping.
   --rankoffset arg        Rank offset for worker threads. (Default: 0)
   --readinline            When benchmark path is a directory, read files 
                           immediately after write while they are still open.
@@ -341,8 +349,22 @@ All options in alphabetical order:
   --s3credfile arg        Path to file containing multiple S3 credentials. Each
                           line in format: access_key:secret_key. Lines starting
                           with # are treated as comments.
+  --s3credcmd arg         Run a long-lived credential provider subprocess.
+                          The command's stdout must produce one credential per
+                          line in format: access_key:secret_key:session_token.
+                          The subprocess is started once and kept alive for the
+                          entire benchmark. Each thread reads one credential at
+                          init; with --s3credrotate, threads read additional
+                          credentials on each rotation. Mutually exclusive with
+                          --s3credfile and --s3credlist.
   --s3credlist arg        Comma-separated list of S3 credentials. Each 
                           credential in format: access_key:secret_key
+  --s3credrotate arg      Rotate each thread's S3 credential every N seconds.
+                          Each thread claims the next unclaimed credential 
+                          from the pool atomically, so no two threads ever 
+                          share a credential at the same time. Requires 
+                          --s3credfile or --s3credlist. 0 = disabled 
+                          (default).
   --s3endpoints arg       Comma-separated list of S3 endpoints. When this 
                           argument is used, the given benchmark paths are used 
                           as bucket names. Also see "--s3key" & "--s3secret". 
@@ -353,8 +375,10 @@ All options in alphabetical order:
                           verification or GPU data transfer.
   --s3fastput             Reduce CPU overhead for uploads. Enables "--s3sign=2 
                           (never)", "--s3nocompress".
-  --s3ignoreerrors        Ignore any S3 upload/download errors. Useful for 
-                          stress-testing.
+  --s3ignoreerrors        Ignore S3 read/write errors. This is intended for 
+                          benchmarks where some requests may fail because the 
+                          S3 storage is still filling up with the written 
+                          data.
   --s3key arg             S3 access key. (This can also be set via the 
                           AWS_ACCESS_KEY_ID env variable.)
   --s3listobj arg         List objects. The given number is the maximum number 

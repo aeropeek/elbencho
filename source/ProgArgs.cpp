@@ -19,6 +19,7 @@
 #include "toolkits/FileTk.h"
 #include "toolkits/HashTk.h"
 #include "toolkits/NumaTk.h"
+#include "toolkits/S3CredentialStore.h"
 #include "toolkits/S3Tk.h"
 #include "toolkits/TerminalTk.h"
 #include "toolkits/TranslatorTk.h"
@@ -484,6 +485,13 @@ void ProgArgs::defineAllowedArgs()
 /*ra*/	(ARG_RANDOMAMOUNT_LONG, bpo::value(&this->randomAmountOrigStr),
 			"Number of bytes to write/read when using random offsets. Only effective when "
 			"benchmark path is a file or block device. (Default: Set to file size)")
+/*ra*/	(ARG_RAMPUP_LONG, bpo::value(&this->rampupSec)->default_value(0),
+			"Spread thread startup over N seconds. Thread T sleeps for "
+			"T*(N*1000/numThreads) milliseconds before its first operation, so threads "
+			"ramp up evenly across the interval. Thread 0 always starts immediately. "
+			"0 = all threads start simultaneously (default). "
+			"Note: --" ARG_TIMELIMITSECS_LONG " counts from wall-clock start, not from when "
+			"the last thread finishes ramping.")
 /*ra*/	(ARG_RANKOFFSET_LONG, bpo::value(&this->rankOffset),
 			"Rank offset for worker threads. (Default: 0)")
 /*re*/	(ARG_READINLINE_LONG, bpo::bool_switch(&this->doReadInline),
@@ -567,9 +575,24 @@ void ProgArgs::defineAllowedArgs()
             "x-amz-sdk-checksum-algorithm header for S3 operations. (EXPERIMENTAL)")
 /*s3c*/	(ARG_S3CREDFILE_LONG, bpo::value(&this->s3CredentialsFile),
 			"Path to file containing multiple S3 credentials. Each line in format: "
-			"access_key:secret_key. Lines starting with # are treated as comments.")
+			"access_key:secret_key[:session_token]. Session token is optional and used for STS "
+			"temporary credentials. Lines starting with # are treated as comments.")
 /*s3c*/	(ARG_S3CREDLIST_LONG, bpo::value(&this->s3CredentialsList),
-			"Comma-separated list of S3 credentials. Each credential in format: access_key:secret_key")
+			"Comma-separated list of S3 credentials. Each credential in format: "
+			"access_key:secret_key[:session_token]. Session token is optional and used for STS "
+			"temporary credentials.")
+/*s3c*/	(ARG_S3CREDCMD_LONG, bpo::value(&this->s3CredCmd)->default_value(""),
+			"Run a long-lived credential provider subprocess. The command's stdout "
+			"must produce one credential per line in format: "
+			"access_key:secret_key:session_token. Lines starting with # are skipped. "
+			"The subprocess is started once at init and kept alive for the entire "
+			"benchmark. Mutually exclusive with --" ARG_S3CREDFILE_LONG
+			" and --" ARG_S3CREDLIST_LONG ".")
+/*s3c*/	(ARG_S3CREDROTATE_LONG, bpo::value(&this->s3CredRotateSec)->default_value(0),
+			"Rotate each thread's S3 credential every N seconds. Each thread claims "
+			"the next unclaimed credential from the pool atomically, so no two threads "
+			"ever share a credential at the same time. Requires --" ARG_S3CREDFILE_LONG
+			", --" ARG_S3CREDLIST_LONG ", or --" ARG_S3CREDCMD_LONG ". 0 = disabled (default).")
 /*s3e*/	(ARG_S3ENDPOINTS_LONG, bpo::value(&this->s3EndpointsStr),
 			"Comma-separated list of S3 endpoints. When this argument is used, the given "
 			"benchmark paths are used as bucket names. Also see \"--" ARG_S3ACCESSKEY_LONG "\" & "
@@ -582,7 +605,8 @@ void ProgArgs::defineAllowedArgs()
             "Reduce CPU overhead for uploads. Enables \"--" ARG_S3SIGNPAYLOAD_LONG "=2 (never)\", "
             "\"--" ARG_S3NOCOMPRESS_LONG "\".")
 /*s3i*/	(ARG_S3IGNOREERRORS_LONG, bpo::bool_switch(&this->ignoreS3Errors),
-			"Ignore any S3 upload/download errors. Useful for stress-testing.")
+			"Ignore S3 read/write errors. This is intended for benchmarks where some requests "
+			"may fail because the S3 storage is still filling up with the written data.")
 /*s3k*/	(ARG_S3ACCESSKEY_LONG, bpo::value(&this->s3AccessKey),
 			"S3 access key. (This can also be set via the " S3_ENV_ACCESS_KEY " env variable.)")
 /*s3l*/	(ARG_S3LISTOBJ_LONG, bpo::value(&this->runS3ListObjNum),
@@ -925,6 +949,7 @@ void ProgArgs::defineDefaults()
 	this->doReadInline = false;
 	this->doStatInline = false;
 	this->nextPhaseDelaySecs = 0;
+	this->rampupSec = 0;
 	this->rotateHostsNum = 0;
 	this->runS3AclPut = false;
 	this->runS3AclGet = false;
@@ -951,8 +976,10 @@ void ProgArgs::defineDefaults()
 	this->s3IgnoreMultipartUpload404 = false;
 	this->stdoutDupFD = -1;
     this->s3ChecksumAlgoStr = "";  // Default to empty string (resolved as NOT_SET)
+	this->s3CredCmd = "";
 	this->s3CredentialsFile = "";
 	this->s3CredentialsList = "";
+	this->s3CredRotateSec = 0;
     this->s3ThroughputTargetGbps = 100;
 }
 
@@ -1326,15 +1353,32 @@ void ProgArgs::checkArgs()
 
     checkPathDependentArgs();
 
+    // --s3credcmd is mutually exclusive with --s3credfile and --s3credlist
+    if(!s3CredCmd.empty() && (!s3CredentialsFile.empty() || !s3CredentialsList.empty()))
+        throw ProgException("--" ARG_S3CREDCMD_LONG " is mutually exclusive with --"
+            ARG_S3CREDFILE_LONG " and --" ARG_S3CREDLIST_LONG ".");
+
     // Check that only one credential source is specified
     if(!s3CredentialsFile.empty() && !s3CredentialsList.empty())
         throw ProgException("Only one of --" ARG_S3CREDFILE_LONG " or --"
             ARG_S3CREDLIST_LONG " may be specified.");
 
     // If using multi-credentials, s3AccessKey and s3AccessSecret must be empty
-    if((!s3CredentialsFile.empty() || !s3CredentialsList.empty()) &&
+    if((!s3CredentialsFile.empty() || !s3CredentialsList.empty() || !s3CredCmd.empty()) &&
         (!s3AccessKey.empty() || !s3AccessSecret.empty()))
         throw ProgException("Cannot specify both multi-credentials and single credential options.");
+
+    if(s3CredRotateSec && s3CredentialsFile.empty() && s3CredentialsList.empty() &&
+        s3CredCmd.empty())
+        throw ProgException("--" ARG_S3CREDROTATE_LONG " requires --" ARG_S3CREDFILE_LONG
+            ", --" ARG_S3CREDLIST_LONG ", or --" ARG_S3CREDCMD_LONG ".");
+
+    if(!s3CredCmd.empty())
+        S3CredentialStore::getInstance().openCredCmdPipe(s3CredCmd);
+
+    if(rampupSec && numThreads <= 1)
+        LOGGER(Log_NORMAL, "NOTE: --" ARG_RAMPUP_LONG " has no effect with a single thread."
+            << std::endl);
 }
 
 /**
@@ -3080,9 +3124,24 @@ void ProgArgs::printHelpS3()
     argsS3ServiceArgsDescription.add_options()
         (ARG_S3CREDFILE_LONG, bpo::value(&this->s3CredentialsFile),
             "Path to file containing multiple S3 credentials. Each line in format: "
-            "access_key:secret_key. Lines starting with # are treated as comments.")
+            "access_key:secret_key[:session_token]. Session token is optional and used for STS "
+            "temporary credentials. Lines starting with # are treated as comments.")
         (ARG_S3CREDLIST_LONG, bpo::value(&this->s3CredentialsList),
-            "Comma-separated list of S3 credentials. Each credential in format: access_key:secret_key")
+            "Comma-separated list of S3 credentials. Each credential in format: "
+            "access_key:secret_key[:session_token]. Session token is optional and used for STS "
+            "temporary credentials.")
+        (ARG_S3CREDCMD_LONG, bpo::value(&this->s3CredCmd)->default_value(""),
+            "Run a long-lived credential provider subprocess. The command's stdout "
+            "must produce one credential per line in format: "
+            "access_key:secret_key:session_token. Lines starting with # are skipped. "
+            "The subprocess is started once at init and kept alive for the entire "
+            "benchmark. Mutually exclusive with --" ARG_S3CREDFILE_LONG
+            " and --" ARG_S3CREDLIST_LONG ".")
+        (ARG_S3CREDROTATE_LONG, bpo::value(&this->s3CredRotateSec)->default_value(0),
+            "Rotate each thread's S3 credential every N seconds. Each thread claims "
+            "the next unclaimed credential from the pool atomically, so no two threads "
+            "ever share a credential at the same time. Requires --" ARG_S3CREDFILE_LONG
+            ", --" ARG_S3CREDLIST_LONG ", or --" ARG_S3CREDCMD_LONG ". 0 = disabled (default).")
         (ARG_S3ENDPOINTS_LONG, bpo::value(&this->s3EndpointsStr),
             "Comma-separated list of S3 endpoints. (Format: [http(s)://]hostname[:port])")
         (ARG_S3ACCESSKEY_LONG, bpo::value(&this->s3AccessKey),
@@ -3469,6 +3528,7 @@ void ProgArgs::setFromPropertyTreeForService(bpt::ptree& tree)
 	numThreads = tree.get<size_t>(ARG_NUMTHREADS_LONG);
 	opsLogPath = tree.get<std::string>(ARG_OPSLOGPATH_LONG);
 	randOffsetAlgo = tree.get<std::string>(ARG_RANDSEEKALGO_LONG);
+	rampupSec = tree.get<uint64_t>(ARG_RAMPUP_LONG);
 	randomAmount = tree.get<uint64_t>(ARG_RANDOMAMOUNT_LONG);
 	runCreateDirsPhase = tree.get<bool>(ARG_CREATEDIRS_LONG);
 	runCreateFilesPhase = tree.get<bool>(ARG_CREATEFILES_LONG);
@@ -3494,8 +3554,10 @@ void ProgArgs::setFromPropertyTreeForService(bpt::ptree& tree)
 	s3AclGrantee = tree.get<std::string>(ARG_S3ACLGRANTEE_LONG);
 	s3AclGranteePermissions = tree.get<std::string>(ARG_S3ACLGRANTS_LONG);
 	s3AclGranteeType = tree.get<std::string>(ARG_S3ACLGRANTEETYPE_LONG);
+	s3CredCmd = tree.get<std::string>(ARG_S3CREDCMD_LONG);
 	s3CredentialsFile = tree.get<std::string>(ARG_S3CREDFILE_LONG);
     s3CredentialsList = tree.get<std::string>(ARG_S3CREDLIST_LONG);
+	s3CredRotateSec = tree.get<uint64_t>(ARG_S3CREDROTATE_LONG);
 	s3EndpointsStr = tree.get<std::string>(ARG_S3ENDPOINTS_LONG);
     s3MaxConnections = tree.get<unsigned>(ARG_S3MAXCONNS_LONG);
     s3MpuSizeVariance = tree.get<size_t>(ARG_S3MPUSIZEVAR_LONG);
@@ -3626,6 +3688,7 @@ void ProgArgs::getAsPropertyTreeForService(bpt::ptree& outTree, size_t serviceRa
 	outTree.put(ARG_OPSLOGPATH_LONG, opsLogPath);
 	outTree.put(ARG_PREALLOCFILE_LONG, doPreallocFile);
 	outTree.put(ARG_NORANDOMALIGN_LONG, useRandomUnaligned);
+	outTree.put(ARG_RAMPUP_LONG, rampupSec);
 	outTree.put(ARG_RANDOMAMOUNT_LONG, randomAmount);
 	outTree.put(ARG_RANDOMOFFSETS_LONG, useRandomOffsets);
 	outTree.put(ARG_RANDSEEKALGO_LONG, randOffsetAlgo);
@@ -3654,8 +3717,10 @@ void ProgArgs::getAsPropertyTreeForService(bpt::ptree& outTree, size_t serviceRa
     outTree.put(ARG_S3BUCKETVERVERIFY_LONG, doS3BucketVersioningVerify);
     outTree.put(ARG_S3CHECKSUM_ALGO_LONG, s3ChecksumAlgoStr);
     outTree.put(ARG_S3CLIENTSINGLETON_LONG, useS3ClientSingleton);
+	outTree.put(ARG_S3CREDCMD_LONG, s3CredCmd);
 	outTree.put(ARG_S3CREDFILE_LONG, s3CredentialsFile);
     outTree.put(ARG_S3CREDLIST_LONG, s3CredentialsList);
+	outTree.put(ARG_S3CREDROTATE_LONG, s3CredRotateSec);
 	outTree.put(ARG_S3ENDPOINTS_LONG, s3EndpointsStr);
 	outTree.put(ARG_S3FASTGET_LONG, useS3FastRead);
 	outTree.put(ARG_S3IGNOREERRORS_LONG, ignoreS3Errors);
